@@ -1,0 +1,139 @@
+#!/usr/bin/env raku
+
+#use lib '/home/mdevine/github.com/raku-Our-Utilities/lib';
+#use lib '/home/mdevine/github.com/raku-Our-Grid/lib';
+#use lib '/home/mdevine/github.com/raku-Our-Redis/lib';
+
+use Async::Command::Multi;
+use Our::Cache;
+use Getopt::Long;
+use Our::Grid;
+use Our::Grid::Cell;
+use JSON::Fast;
+use Our::Utilities;
+
+sub MAIN (
+    Str                 :@vios!,                                #= accumulate a list of VIO servers to query
+    Bool                :$group-by-system,                      #= group data around systems
+    Bool                :$csv,                                  #= dump CSV to STDOUT
+    Str                 :$grid-proxy-host   = '127.0.0.1',      #= hostname of grid proxy for remote services
+    Bool                :$gui,                                  #= Graphical User Interface
+    Bool                :$html,                                 #= dump HTML to STDOUT
+    Bool                :$json,                                 #= dump JSON to STDOUT
+#   Grid-Email-Formats  :$mail-body-format,                     #= email body format
+                        :$mail-body-format,                     #= email body format
+                        :$mail-from,                            #= email 'From:' addressee
+                        :@mail-to,                              #= accumulate email 'To:' addressees
+                        :@mail-cc,                              #= accumulate email 'Cc:' addressees
+                        :@mail-bcc,                             #= accumulate email 'Bcc:' addressees
+    Bool                :$text,                                 #= TEXT print
+    Bool                :$tui,                                  #= Terminal User Interface
+    Bool                :$xml,                                  #= dump XML to STDOUT
+    Bool                :$light-mode,                           #= reverse header highlight for light-mode
+    Int                 :@sort-columns,                         #= accumulate column numbers to sort by
+    Bool                :$sort-descending,                      #= sort in descending order
+) {
+    die "Specify '--vios='" unless @vios.elems;
+    my Bool $mailing;
+    my $from                = $mail-from;
+    my $format              = $mail-body-format;
+    if $mail-from && @mail-to.elems {
+        die '--mail-from=<email-address> required to send mail!' unless $mail-from;
+        die '--mail-to=<email-address[,email-address]> required to send mail!' unless @mail-to.elems;
+        $from               = $mail-from[0] if $mail-from ~~ Array;
+        $format             = $mail-body-format[0] if $mail-body-format ~~ Array;
+        $mailing = True;
+    }
+    my $reverse-highlight   = $light-mode ?? True !! False;
+    my $preferences-cache-file-name = cache-file-name(:meta<preferences>);
+    my $preferences-cache   = cache(:cache-file-name($preferences-cache-file-name));
+    $preferences-cache      = from-json($preferences-cache) if $preferences-cache;
+    without $light-mode {
+        $reverse-highlight  = $preferences-cache<light-mode> if $preferences-cache<light-mode>:exists;
+    }
+    cache(:cache-file-name($preferences-cache-file-name), :data(to-json({light-mode => $reverse-highlight})));
+    my %command;
+    for @vios -> $vio {
+        %command{$vio}   = ['ssh', 'padmin@' ~ $vio, 'ioscli', 'lsdev', '-type', 'adapter', '-fmt', ':'];
+    }
+    my $command-manager = Async::Command::Multi.new(:%command, :20time-out, :8batch);
+    $command-manager.sow;
+    my %results = $command-manager.reap;
+    for %results.keys.sort -> $vio {
+put %results{$vio}.stdout-results.trim;
+    }
+
+
+}
+
+=finish
+
+    my Our::Grid $grid;
+    if $group-by-system {
+        $grid  .= new: :title('df Report'), :$grid-proxy-host, :$reverse-highlight, :0group-by-column;
+    }
+    else {
+        $grid  .= new: :title('df Report'), :$grid-proxy-host, :$reverse-highlight;
+    }
+    $grid.add-heading('System',         :justification<left>),
+    $grid.add-heading('Filesystem',     :justification<left>);
+    $grid.add-heading('Total',          :justification<right>);
+    $grid.add-heading('Used',           :justification<right>);
+    $grid.add-heading('Available',      :justification<right>);
+    $grid.add-heading('% Used',         :justification<right>);
+    $grid.add-heading('Mount Point',    :justification<left>);
+    for %server-results.keys.sort -> $server {
+        for %server-results{$server}.list -> $df-record {
+            next if $df-record.cap-percent-num <= $percent-above;
+            $grid.add-cell(:cell(Our::Grid::Cell.new(:text($server), :bold)));
+            $grid.add-cell(:cell(Our::Grid::Cell.new(:text($df-record.filesystem),      :justification<left>)));
+            $grid.add-cell(:cell(Our::Grid::Cell.new(:text($df-record.total-bytes),     :justification<right>,  :bytes-to-bytes-unit)));
+            $grid.add-cell(:cell(Our::Grid::Cell.new(:text($df-record.used-bytes),      :justification<right>,  :bytes-to-bytes-unit)));
+            $grid.add-cell(:cell(Our::Grid::Cell.new(:text($df-record.available-bytes), :justification<right>,  :bytes-to-bytes-unit)));
+            if 70 <= $df-record.cap-percent-num < 80 {
+                $grid.add-cell(:cell(Our::Grid::Cell.new(:text($df-record.capacity),    :justification<right>,  :foreground<yellow>)));
+            }
+            elsif 80 <= $df-record.cap-percent-num < 90 {
+                $grid.add-cell(:cell(Our::Grid::Cell.new(:text($df-record.capacity),    :justification<right>,  :foreground<orange>)));
+            }
+            elsif 90 <= $df-record.cap-percent-num < 100 {
+                $grid.add-cell(:cell(Our::Grid::Cell.new(:text($df-record.capacity),    :justification<right>,  :foreground<red>)));
+            }
+            elsif $df-record.cap-percent-num == 100 {
+                $grid.add-cell(:cell(Our::Grid::Cell.new(:text($df-record.capacity),    :justification<right>,  :foreground<red>, :blink)));
+            }
+            else {
+                $grid.add-cell(:cell(Our::Grid::Cell.new(:text($df-record.capacity),    :justification<right>)));
+            }
+            $grid.add-cell(:cell(Our::Grid::Cell.new(:text($df-record.mount-point),     :justification<left>)));
+            $grid.current-row++;
+        }
+    }
+    if @sort-columns.elems {
+#       my Int @sort-columns = $sort-columns.split(',').map({ $_.Int });
+        $grid.sort-by-columns(:@sort-columns, :descending($sort-descending));
+    }
+    {
+        when $text          {   $grid.TEXT-print; }
+        when $html          {   $grid.HTML-print; }
+        when $csv           {   $grid.CSV-print;  }
+        when $json          {   $grid.JSON-print; }
+        when $mailing       {
+                                $grid.send-proxy-mail-via-redis(
+                                    :cro-host<127.0.0.1>,
+                                    :22151cro-port,
+                                    :mail-from($from),
+                                    :@mail-to,
+                                    :@mail-cc,
+                                    :@mail-bcc,
+                                    :$format,
+                                );
+        }
+        when $xml           {   $grid.XML-print;  }
+        when $tui           {   $grid.TUI;        }
+        when $gui           {   $grid.GUI;        }
+        default             {   $grid.ANSI-print; }
+    }
+}
+
+=finish
