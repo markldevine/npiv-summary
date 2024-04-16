@@ -133,8 +133,6 @@ sub MAIN (
     Bool                :$tui,                                  #= Terminal User Interface
     Bool                :$xml,                                  #= dump XML to STDOUT
     Bool                :$light-mode,                           #= reverse header highlight for light-mode
-    Int                 :@sort-columns,                         #= accumulate column numbers to sort by
-    Bool                :$sort-descending,                      #= sort in descending order
 ) {
     my Bool $mailing;
     my $from                = $mail-from;
@@ -237,43 +235,42 @@ sub MAIN (
     else {
         $grid  .= new: :title('df Report'), :$grid-proxy-host, :$reverse-highlight;
     }
-    $grid.add-heading('Managed System', :justification<left>),
-    $grid.add-heading('Filesystem',     :justification<left>);
-    $grid.add-heading('Total',          :justification<right>);
-    $grid.add-heading('Used',           :justification<right>);
-    $grid.add-heading('Available',      :justification<right>);
-    $grid.add-heading('% Used',         :justification<right>);
-    $grid.add-heading('Mount Point',    :justification<left>);
-    for %server-results.keys.sort -> $server {
-        for %server-results{$server}.list -> $df-record {
-            next if $df-record.cap-percent-num <= $percent-above;
-            $grid.add-cell(:cell(Our::Grid::Cell.new(:text($server), :bold)));
-            $grid.add-cell(:cell(Our::Grid::Cell.new(:text($df-record.filesystem),      :justification<left>)));
-            $grid.add-cell(:cell(Our::Grid::Cell.new(:text($df-record.total-bytes),     :justification<right>,  :bytes-to-bytes-unit)));
-            $grid.add-cell(:cell(Our::Grid::Cell.new(:text($df-record.used-bytes),      :justification<right>,  :bytes-to-bytes-unit)));
-            $grid.add-cell(:cell(Our::Grid::Cell.new(:text($df-record.available-bytes), :justification<right>,  :bytes-to-bytes-unit)));
-            if 70 <= $df-record.cap-percent-num < 80 {
-                $grid.add-cell(:cell(Our::Grid::Cell.new(:text($df-record.capacity),    :justification<right>,  :foreground<yellow>)));
+    $grid.add-heading('Managed Server',     :justification<left>),
+    $grid.add-heading('VIO Server',         :justification<left>);
+    $grid.add-heading('Physical Location',  :justification<left>);
+    $grid.add-heading('WW Node Name',       :justification<right>);
+    $grid.add-heading('WW Port Name',       :justification<right>);
+    $grid.add-heading('LPAR',               :justification<left>);
+    $grid.add-heading('vfchost',            :justification<left>);
+    $grid.add-heading('LPAR Adapter',       :justification<center>);
+    $grid.add-heading('LPAR Location',      :justification<left>);
+    $grid.add-heading('LPAR WW Node Name',  :justification<right>);
+    for %hmc{$hmc}.keys.sort -> $managed-server {
+        $grid.add-cell(:cell(Our::Grid::Cell.new(:text($managed-server), :bold,                                                                 :justification<left>)));
+        for %hmc{$hmc}{$managed-server}<vios>.keys -> $vio {
+            $grid.add-cell(:cell(Our::Grid::Cell.new(:text($vio),                                                                               :justification<left>)));
+            for %hmc{$hmc}{$managed-server}<vios>{$vio}<fcs>.list -> $fcs-number {
+                $grid.add-cell(:cell(Our::Grid::Cell.new(:text('fcs' ~ $fcs-number),                                                            :justification<left>)));
+                $grid.add-cell(:cell(Our::Grid::Cell.new(:text(%hmc{$hmc}{$managed-server}<vios>{$vio}<fcs>[$fcs-number].physical-location),    :justification<left>)));
+                $grid.add-cell(:cell(Our::Grid::Cell.new(:text(%hmc{$hmc}{$managed-server}<vios>{$vio}<fcs>[$fcs-number].world-wide-node-name), :justification<left>)));
+                $grid.add-cell(:cell(Our::Grid::Cell.new(:text(%hmc{$hmc}{$managed-server}<vios>{$vio}<fcs>[$fcs-number].world-wide-port-name), :justification<left>)));
             }
-            elsif 80 <= $df-record.cap-percent-num < 90 {
-                $grid.add-cell(:cell(Our::Grid::Cell.new(:text($df-record.capacity),    :justification<right>,  :foreground<orange>)));
-            }
-            elsif 90 <= $df-record.cap-percent-num < 100 {
-                $grid.add-cell(:cell(Our::Grid::Cell.new(:text($df-record.capacity),    :justification<right>,  :foreground<red>)));
-            }
-            elsif $df-record.cap-percent-num == 100 {
-                $grid.add-cell(:cell(Our::Grid::Cell.new(:text($df-record.capacity),    :justification<right>,  :foreground<red>, :blink)));
-            }
-            else {
-                $grid.add-cell(:cell(Our::Grid::Cell.new(:text($df-record.capacity),    :justification<right>)));
-            }
-            $grid.add-cell(:cell(Our::Grid::Cell.new(:text($df-record.mount-point),     :justification<left>)));
+            
+#   sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List)
+
+
+            $grid.add-cell(:cell(Our::Grid::Cell.new(:text(),     :justification<left>)));
+            $grid.add-cell(:cell(Our::Grid::Cell.new(:text(),     :justification<left>)));
+            $grid.add-cell(:cell(Our::Grid::Cell.new(:text(),     :justification<left>)));
+            $grid.add-cell(:cell(Our::Grid::Cell.new(:text(),     :justification<left>)));
+            $grid.add-cell(:cell(Our::Grid::Cell.new(:text(),     :justification<left>)));
+            $grid.add-cell(:cell(Our::Grid::Cell.new(:text(),     :justification<left>)));
+            $grid.add-cell(:cell(Our::Grid::Cell.new(:text(),     :justification<left>)));
+            $grid.add-cell(:cell(Our::Grid::Cell.new(:text(),     :justification<left>)));
+
+
             $grid.current-row++;
         }
-    }
-    if @sort-columns.elems {
-#       my Int @sort-columns = $sort-columns.split(',').map({ $_.Int });
-        $grid.sort-by-columns(:@sort-columns, :descending($sort-descending));
     }
     {
         when $text          {   $grid.TEXT-print; }
