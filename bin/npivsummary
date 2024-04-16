@@ -12,8 +12,111 @@ use Our::Grid::Cell;
 use JSON::Fast;
 use Our::Utilities;
 
+use Data::Dump::Tree;
+#use Grammar::Debugger;
+
+#  fcs0             U78D8.ND0.FGD01TZ-P0-C1-C0-T0  PCIe3 2-Port 32Gb FC Adapter (df1000e314101506)
+#
+#        Part Number.................01FT700
+#        Serial Number...............Y050HY1990A8
+#        EC Level....................P14610
+#        Customer Card ID Number.....578F
+#        Manufacturer................001D
+#        FRU Number..................01FT704
+#        Device Specific.(ZM)........3
+#        Network Address.............100000109BE073E1
+#        Device Specific.(Z0)........0000000C
+#        Device Specific.(Z1)........00000001
+#        Device Specific.(Z2)........00000000
+#        Device Specific.(Z3)........08090000
+#        Device Specific.(Z4)........01003001
+#        Device Specific.(Z5)........2E323537
+#        Device Specific.(Z6)........2E323537
+#        Device Specific.(Z7)........C0022C40
+#        Device Specific.(Z8)........200000109BE073E1
+#        Device Specific.(Z9)........12.4.257.30
+#        Device Specific.(ZA)........12.4.257.30
+#        Device Specific.(ZB)........30310000
+#        Device Specific.(ZC)........00040000
+#        Device Specific.(ZD)........000000FF
+#        Hardware Location Code......U78D8.ND0.FGD01TZ-P0-C1-C0-T0
+#
+#
+#  fcs0             U9080.HEX.78725A8-V255-C2155-T0  Virtual Fibre Channel Client Adapter
+#
+#        Network Address.............C050760C12130008
+#        Device Specific.(Z0)........
+#        Device Specific.(Z1)........
+#        Device Specific.(Z2)........
+#        Device Specific.(Z3)........
+#        Device Specific.(Z4)........
+#        Device Specific.(Z5)........
+#        Device Specific.(Z6)........
+#        Device Specific.(Z7)........
+#        Device Specific.(Z8)........C050760C12130008
+#        Device Specific.(Z9)........
+#        Hardware Location Code......U9080.HEX.78725A8-V255-C2155-T0
+
+my %vios-results;
+
+my class FCS {
+    has Str $.physical-location;
+    has Str $.world-wide-node-name;
+    has Str $.world-wide-port-name;
+}
+
+my class NPIV {
+    has Str $.server-vadapter-location;
+    has Int $.lpar-id;
+    has Str $.lpar-name;
+    has Str $.operating-system;
+    has Str $.status;
+    has Str $.vio-padapter-name;
+    has Str $.vio-padapter-location;
+    has Int $.ports-logged-in;
+    has Str $.hex-flags;
+    has Str $.client-fcs-device;
+    has Str $.client-vadapter-location;
+}
+
+grammar FCS-grammar {
+    token TOP {
+        ^
+        <fcs-record>+
+    }
+    token fcs-record {
+        \s+ <fcs-device> \s+  
+        .+?
+        Network \s Address '.'+ <network-address>
+        .+?
+        Device \s Specific.\(Z8\) '.'+ <Z8>
+        .+?
+        Hardware \s Location \s Code '.'+ <hardware-location>
+        .+?
+    }
+    token fcs-device        { fcs <fcs-number>                      }
+    token fcs-number        { \d+                                   }
+    token network-address   { <[0..9A..F]> ** 16                    }
+    token Z8                { <[0..9A..F]> ** 16                    }
+    token hardware-location { \w+ '.' \w+ '.' <[0..9A..F]>+ .+? $$  }
+}
+
+class FCS-actions {
+    has $.vio-server    is required;
+
+    method fcs-record ($/) {
+        my Int $fcs-number = +$/<fcs-device><fcs-number>;
+        %vios-results{$!vio-server}[$fcs-number]   = 
+            FCS.new:
+                :physical-location(~$/<hardware-location>),
+                :world-wide-node-name(~$/<Z8>),
+                :world-wide-port-name(~$/<network-address>),
+            ;
+    }
+}
+
 sub MAIN (
-    Str                 :@vios!,                                #= accumulate a list of VIO servers to query
+    Str                 :$hmc!,                                 #= HMC to query
     Bool                :$group-by-system,                      #= group data around systems
     Bool                :$csv,                                  #= dump CSV to STDOUT
     Str                 :$grid-proxy-host   = '127.0.0.1',      #= hostname of grid proxy for remote services
@@ -33,7 +136,6 @@ sub MAIN (
     Int                 :@sort-columns,                         #= accumulate column numbers to sort by
     Bool                :$sort-descending,                      #= sort in descending order
 ) {
-    die "Specify '--vios='" unless @vios.elems;
     my Bool $mailing;
     my $from                = $mail-from;
     my $format              = $mail-body-format;
@@ -52,17 +154,82 @@ sub MAIN (
         $reverse-highlight  = $preferences-cache<light-mode> if $preferences-cache<light-mode>:exists;
     }
     cache(:cache-file-name($preferences-cache-file-name), :data(to-json({light-mode => $reverse-highlight})));
+
+    my %hmc;
     my %command;
-    for @vios -> $vio {
-        %command{$vio}   = ['ssh', 'padmin@' ~ $vio, 'ioscli', 'lsdev', '-type', 'adapter', '-fmt', ':'];
-    }
-    my $command-manager = Async::Command::Multi.new(:%command, :20time-out, :8batch);
-    $command-manager.sow;
-    my %results = $command-manager.reap;
-    for %results.keys.sort -> $vio {
-put %results{$vio}.stdout-results.trim;
+    %command{$hmc}          = ['ssh', $hmc, 'lssyscfg', '-r', 'sys', '-F', 'name'];
+    my $command-manager     = Async::Command::Multi.new(:%command, :20time-out, :8batch);
+    my %results             = $command-manager.sow.reap;
+    for %results.keys.sort -> $hmc-server {
+        for %results{$hmc-server}.stdout-results.trim.split("\n").list -> $managed-server {
+            next unless $managed-server ~~ /9080 '-' HEX/;
+            %hmc{$hmc-server}{$managed-server} = {};
+        }
+        die "No managed servers found on HMC '$hmc-server'!" unless %hmc{$hmc}.elems;
     }
 
+    %command                = ();
+    for %hmc{$hmc}.keys.sort -> $managed-server {
+        %command{$managed-server} = ['ssh', $hmc, 'lssyscfg', '-m', $managed-server, '-r', 'lpar', '-F', 'lpar_id,name'];
+    }
+    $command-manager        = Async::Command::Multi.new(:%command, :20time-out, :8batch);
+    %results                = $command-manager.sow.reap;
+    for %results.keys.sort -> $managed-server {
+        for %results{$managed-server}.stdout-results.trim.split("\n").list -> $record {
+            my ($lpar-id, $name) = $record.split: ',';
+            %hmc{$hmc}{$managed-server}<id2name>{$lpar-id}  = $name;
+            %hmc{$hmc}{$managed-server}<name2id>{$name}     = $lpar-id;
+        }
+    }
+
+    for %hmc{$hmc}.keys.sort -> $managed-server {
+        for %hmc{$hmc}{$managed-server}<name2id>.keys -> $name {
+            %hmc{$hmc}{$managed-server}<vios>{$name} = {} if $name ~~ /vio/;
+        }
+    }
+
+    %command                = ();
+    for %hmc{$hmc}.keys.sort -> $managed-server {
+        for %hmc{$hmc}{$managed-server}<vios>.keys -> $vio {
+            %command{$vio}      = ['ssh', 'padmin@' ~ $vio, 'ioscli', 'lsdev', '-dev', 'fcs*', '-vpd'];
+        }
+        $command-manager        = Async::Command::Multi.new(:%command, :20time-out, :8batch);
+        %results                = $command-manager.sow.reap;
+        for %results.keys.sort -> $vio-server {
+            FCS-grammar.parse(%results{$vio-server}.stdout-results, :actions(FCS-actions.new(:$vio-server)));
+            die 'No fcs adapters found!' unless %vios-results{$vio-server}.elems;
+            %hmc{$hmc}{$managed-server}<vios>{$vio-server}<fcs> = %vios-results{$vio-server};
+        }
+    }
+
+    %command                = ();
+    for %hmc{$hmc}.keys.sort -> $managed-server {
+        for %hmc{$hmc}{$managed-server}<vios>.keys -> $vio {
+            %command{$vio}      = ['ssh', 'padmin@' ~ $vio, 'ioscli', 'lsmap', '-npiv', '-all', '-fmt', ':'];
+        }
+        $command-manager        = Async::Command::Multi.new(:%command, :20time-out, :8batch);
+        %results                = $command-manager.sow.reap;
+        for %results.keys.sort -> $vio-server {
+            for %results{$vio-server}.stdout-results.trim.split("\n").list -> $record {
+                my @fields      = $record.split(':');
+                %hmc{$hmc}{$managed-server}<vios>{$vio-server}<npiv>{@fields[0]} = NPIV.new:
+                    :server-vadapter-location(@fields[1]),
+                    :lpar-id(@fields[2].Int),
+                    :lpar-name(@fields[3]),
+                    :operating-system(@fields[4]),
+                    :status(@fields[5]),
+                    :vio-padapter-name(@fields[6]),
+                    :vio-padapter-location(@fields[7]),
+                    :ports-logged-in(@fields[8].Int),
+                    :hex-flags(@fields[9]),
+                    :client-fcs-device(@fields[10]),
+                    :client-vadapter-location(@fields[11]),
+                ;
+            }
+        }
+    }
+
+ddt %hmc;
 
 }
 
