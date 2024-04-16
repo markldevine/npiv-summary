@@ -228,12 +228,7 @@ sub MAIN (
             }
         }
     }
-
-ddt %hmc;
-
-}
-
-=finish
+#ddt %hmc;
 
     my Our::Grid $grid;
     if $group-by-system {
@@ -242,7 +237,7 @@ ddt %hmc;
     else {
         $grid  .= new: :title('df Report'), :$grid-proxy-host, :$reverse-highlight;
     }
-    $grid.add-heading('System',         :justification<left>),
+    $grid.add-heading('Managed System', :justification<left>),
     $grid.add-heading('Filesystem',     :justification<left>);
     $grid.add-heading('Total',          :justification<right>);
     $grid.add-heading('Used',           :justification<right>);
