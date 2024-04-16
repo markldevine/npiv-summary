@@ -12,7 +12,7 @@ use Our::Grid::Cell;
 use JSON::Fast;
 use Our::Utilities;
 
-use Data::Dump::Tree;
+#use Data::Dump::Tree;
 #use Grammar::Debugger;
 
 #  fcs0             U78D8.ND0.FGD01TZ-P0-C1-C0-T0  PCIe3 2-Port 32Gb FC Adapter (df1000e314101506)
@@ -117,7 +117,7 @@ class FCS-actions {
 
 sub MAIN (
     Str                 :$hmc!,                                 #= HMC to query
-    Bool                :$group-by-system,                      #= group data around systems
+    Bool                :$group-by-vios,                        #= group data around vio servers
     Bool                :$csv,                                  #= dump CSV to STDOUT
     Str                 :$grid-proxy-host   = '127.0.0.1',      #= hostname of grid proxy for remote services
     Bool                :$gui,                                  #= Graphical User Interface
@@ -158,7 +158,7 @@ sub MAIN (
     %command{$hmc}          = ['ssh', $hmc, 'lssyscfg', '-r', 'sys', '-F', 'name'];
     my $command-manager     = Async::Command::Multi.new(:%command, :20time-out, :8batch);
     my %results             = $command-manager.sow.reap;
-    for %results.keys.sort -> $hmc-server {
+    for %results.keys.sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List) -> $hmc-server {
         for %results{$hmc-server}.stdout-results.trim.split("\n").list -> $managed-server {
             next unless $managed-server ~~ /9080 '-' HEX/;
             %hmc{$hmc-server}{$managed-server} = {};
@@ -167,12 +167,12 @@ sub MAIN (
     }
 
     %command                = ();
-    for %hmc{$hmc}.keys.sort -> $managed-server {
+    for %hmc{$hmc}.keys.sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List) -> $managed-server {
         %command{$managed-server} = ['ssh', $hmc, 'lssyscfg', '-m', $managed-server, '-r', 'lpar', '-F', 'lpar_id,name'];
     }
     $command-manager        = Async::Command::Multi.new(:%command, :20time-out, :8batch);
     %results                = $command-manager.sow.reap;
-    for %results.keys.sort -> $managed-server {
+    for %results.keys.sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List) -> $managed-server {
         for %results{$managed-server}.stdout-results.trim.split("\n").list -> $record {
             my ($lpar-id, $name) = $record.split: ',';
             %hmc{$hmc}{$managed-server}<id2name>{$lpar-id}  = $name;
@@ -180,20 +180,20 @@ sub MAIN (
         }
     }
 
-    for %hmc{$hmc}.keys.sort -> $managed-server {
+    for %hmc{$hmc}.keys.sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List) -> $managed-server {
         for %hmc{$hmc}{$managed-server}<name2id>.keys -> $name {
             %hmc{$hmc}{$managed-server}<vios>{$name} = {} if $name ~~ /vio/;
         }
     }
 
     %command                = ();
-    for %hmc{$hmc}.keys.sort -> $managed-server {
-        for %hmc{$hmc}{$managed-server}<vios>.keys -> $vio {
+    for %hmc{$hmc}.keys.sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List) -> $managed-server {
+        for %hmc{$hmc}{$managed-server}<vios>.keys.sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List) -> $vio {
             %command{$vio}      = ['ssh', 'padmin@' ~ $vio, 'ioscli', 'lsdev', '-dev', 'fcs*', '-vpd'];
         }
         $command-manager        = Async::Command::Multi.new(:%command, :20time-out, :8batch);
         %results                = $command-manager.sow.reap;
-        for %results.keys.sort -> $vio-server {
+        for %results.keys.sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List) -> $vio-server {
             FCS-grammar.parse(%results{$vio-server}.stdout-results, :actions(FCS-actions.new(:$vio-server)));
             die 'No fcs adapters found!' unless %vios-results{$vio-server}.elems;
             %hmc{$hmc}{$managed-server}<vios>{$vio-server}<fcs> = %vios-results{$vio-server};
@@ -201,19 +201,19 @@ sub MAIN (
     }
 
     %command                = ();
-    for %hmc{$hmc}.keys.sort -> $managed-server {
+    for %hmc{$hmc}.keys.sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List) -> $managed-server {
         for %hmc{$hmc}{$managed-server}<vios>.keys -> $vio {
             %command{$vio}      = ['ssh', 'padmin@' ~ $vio, 'ioscli', 'lsmap', '-npiv', '-all', '-fmt', ':'];
         }
         $command-manager        = Async::Command::Multi.new(:%command, :20time-out, :8batch);
         %results                = $command-manager.sow.reap;
-        for %results.keys.sort -> $vio-server {
+        for %results.keys.sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List) -> $vio-server {
             for %results{$vio-server}.stdout-results.trim.split("\n").list -> $record {
                 my @fields      = $record.split(':');
                 %hmc{$hmc}{$managed-server}<vios>{$vio-server}<npiv>{@fields[0]} = NPIV.new:
                     :server-vadapter-location(@fields[1]),
                     :lpar-id(@fields[2].Int),
-                    :lpar-name(@fields[3]),
+                    :lpar-name(@fields[3] ?? @fields[3] !! ''),
                     :operating-system(@fields[4]),
                     :status(@fields[5]),
                     :vio-padapter-name(@fields[6]),
@@ -223,20 +223,20 @@ sub MAIN (
                     :client-fcs-device(@fields[10]),
                     :client-vadapter-location(@fields[11]),
                 ;
+                %hmc{$hmc}{$managed-server}<vios>{$vio-server}<viopadaptername2vfchost>{@fields[6]}.push: @fields[0];
             }
         }
     }
-#ddt %hmc;
-
     my Our::Grid $grid;
-    if $group-by-system {
-        $grid  .= new: :title('df Report'), :$grid-proxy-host, :$reverse-highlight, :0group-by-column;
+    if $group-by-vios {
+        $grid  .= new: :title('NPIV Summary'), :$grid-proxy-host, :$reverse-highlight, :0group-by-column;
     }
     else {
-        $grid  .= new: :title('df Report'), :$grid-proxy-host, :$reverse-highlight;
+        $grid  .= new: :title('NPIV Summary'), :$grid-proxy-host, :$reverse-highlight;
     }
-    $grid.add-heading('Managed Server',     :justification<left>),
+#   $grid.add-heading('Managed Server',     :justification<left>),
     $grid.add-heading('VIO Server',         :justification<left>);
+    $grid.add-heading('Physical Adapter',   :justification<left>);
     $grid.add-heading('Physical Location',  :justification<left>);
     $grid.add-heading('WW Node Name',       :justification<right>);
     $grid.add-heading('WW Port Name',       :justification<right>);
@@ -245,31 +245,31 @@ sub MAIN (
     $grid.add-heading('LPAR Adapter',       :justification<center>);
     $grid.add-heading('LPAR Location',      :justification<left>);
     $grid.add-heading('LPAR WW Node Name',  :justification<right>);
-    for %hmc{$hmc}.keys.sort -> $managed-server {
-        $grid.add-cell(:cell(Our::Grid::Cell.new(:text($managed-server), :bold,                                                                 :justification<left>)));
-        for %hmc{$hmc}{$managed-server}<vios>.keys -> $vio {
-            $grid.add-cell(:cell(Our::Grid::Cell.new(:text($vio),                                                                               :justification<left>)));
-            for %hmc{$hmc}{$managed-server}<vios>{$vio}<fcs>.list -> $fcs-number {
-                $grid.add-cell(:cell(Our::Grid::Cell.new(:text('fcs' ~ $fcs-number),                                                            :justification<left>)));
-                $grid.add-cell(:cell(Our::Grid::Cell.new(:text(%hmc{$hmc}{$managed-server}<vios>{$vio}<fcs>[$fcs-number].physical-location),    :justification<left>)));
-                $grid.add-cell(:cell(Our::Grid::Cell.new(:text(%hmc{$hmc}{$managed-server}<vios>{$vio}<fcs>[$fcs-number].world-wide-node-name), :justification<left>)));
-                $grid.add-cell(:cell(Our::Grid::Cell.new(:text(%hmc{$hmc}{$managed-server}<vios>{$vio}<fcs>[$fcs-number].world-wide-port-name), :justification<left>)));
+    for %hmc{$hmc}.keys.sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List) -> $managed-server {
+#       $grid.add-cell(:cell(Our::Grid::Cell.new(:text($managed-server), :bold,                                                                         :justification<left>)), :0col);
+        for %hmc{$hmc}{$managed-server}<vios>.keys.sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List) -> $vio {
+            $grid.add-cell(:cell(Our::Grid::Cell.new(:text($vio),                                                                                       :justification<left>)), :0col);
+            loop (my $fcs-number = 0; $fcs-number < %hmc{$hmc}{$managed-server}<vios>{$vio}<fcs>.elems; $fcs-number++) {
+                next unless %hmc{$hmc}{$managed-server}<vios>{$vio}<fcs>[$fcs-number]:exists;
+                $grid.add-cell(:cell(Our::Grid::Cell.new(:text('fcs' ~ $fcs-number),                                                                    :justification<left>)), :1col);
+                $grid.add-cell(:cell(Our::Grid::Cell.new(:text(%hmc{$hmc}{$managed-server}<vios>{$vio}<fcs>[$fcs-number].physical-location),            :justification<left>)), :2col);
+                $grid.add-cell(:cell(Our::Grid::Cell.new(:text(%hmc{$hmc}{$managed-server}<vios>{$vio}<fcs>[$fcs-number].world-wide-node-name),         :justification<left>)), :3col);
+                $grid.add-cell(:cell(Our::Grid::Cell.new(:text(%hmc{$hmc}{$managed-server}<vios>{$vio}<fcs>[$fcs-number].world-wide-port-name),         :justification<left>)), :4col);
+                for %hmc{$hmc}{$managed-server}<vios>{$vio}<viopadaptername2vfchost>{'fcs' ~ $fcs-number}.list -> $vfchost {
+                    next unless $vfchost;
+                    $grid.add-cell(:cell(Our::Grid::Cell.new(:text($vfchost),                                                                           :justification<left>)), :5col);
+                    if %hmc{$hmc}{$managed-server}<vios>{$vio}<npiv>{$vfchost}.lpar-name {
+                        $grid.add-cell(:cell(Our::Grid::Cell.new(:text(%hmc{$hmc}{$managed-server}<vios>{$vio}<npiv>{$vfchost}.lpar-name),              :justification<left>)), :6col);
+                    }
+                    else {
+                        $grid.add-cell(:cell(Our::Grid::Cell.new(:text(''),                                                                             :justification<left>)), :6col);
+                    }
+                    $grid.add-cell(:cell(Our::Grid::Cell.new(:text(%hmc{$hmc}{$managed-server}<vios>{$vio}<npiv>{$vfchost}.client-fcs-device),          :justification<left>)), :7col);
+                    $grid.add-cell(:cell(Our::Grid::Cell.new(:text(%hmc{$hmc}{$managed-server}<vios>{$vio}<npiv>{$vfchost}.client-vadapter-location),   :justification<left>)), :8col);
+                    $grid.add-cell(:cell(Our::Grid::Cell.new(:text('TBD'),                                                                              :justification<left>)), :9col);
+                    $grid.current-row++;
+                }
             }
-            
-#   sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List)
-
-
-            $grid.add-cell(:cell(Our::Grid::Cell.new(:text(),     :justification<left>)));
-            $grid.add-cell(:cell(Our::Grid::Cell.new(:text(),     :justification<left>)));
-            $grid.add-cell(:cell(Our::Grid::Cell.new(:text(),     :justification<left>)));
-            $grid.add-cell(:cell(Our::Grid::Cell.new(:text(),     :justification<left>)));
-            $grid.add-cell(:cell(Our::Grid::Cell.new(:text(),     :justification<left>)));
-            $grid.add-cell(:cell(Our::Grid::Cell.new(:text(),     :justification<left>)));
-            $grid.add-cell(:cell(Our::Grid::Cell.new(:text(),     :justification<left>)));
-            $grid.add-cell(:cell(Our::Grid::Cell.new(:text(),     :justification<left>)));
-
-
-            $grid.current-row++;
         }
     }
     {

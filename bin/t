@@ -1,0 +1,20 @@
+#!/usr/bin/env raku
+
+my @vfchosts    =
+                    'vfchost0',
+                    'vfchost1',
+                    'vfchost2',
+                    'vfchost3',
+                    'vfchost4',
+                    'vfchost5',
+                    'vfchost6',
+                    'vfchost7',
+                    'vfchost8',
+                    'vfchost9',
+                    'vfchost10',
+                    'xyz',
+                    'vfchost11';
+
+for @vfchosts.sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List) -> $vfchost {
+    put $vfchost;
+}
