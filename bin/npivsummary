@@ -12,7 +12,7 @@ use Our::Grid::Cell;
 use JSON::Fast;
 use Our::Utilities;
 
-#use Data::Dump::Tree;
+use Data::Dump::Tree;
 #use Grammar::Debugger;
 
 #  fcs0             U78D8.ND0.FGD01TZ-P0-C1-C0-T0  PCIe3 2-Port 32Gb FC Adapter (df1000e314101506)
@@ -57,7 +57,9 @@ use Our::Utilities;
 #        Device Specific.(Z9)........
 #        Hardware Location Code......U9080.HEX.78725A8-V255-C2155-T0
 
+my %HMC;
 my %vios-results;
+my %client-results;
 
 my class FCS {
     has Str $.physical-location;
@@ -77,6 +79,95 @@ my class NPIV {
     has Str $.hex-flags;
     has Str $.client-fcs-device;
     has Str $.client-vadapter-location;
+}
+
+my class LSPPARTITIONDLPAR {
+    has Int     $.partition-number;
+    has Str     $.model;
+    has Str     $.type;
+    has Str     $.serial-number;
+    has Str     $.ip-address;
+    has Bool    $.active;
+    has Str     $.os-name;
+    has Str     $.os-vr;
+    has Str     $.os-level;
+}
+
+
+my grammar LSPPARTITIONDLPAR-grammar {
+    token TOP {
+        ^
+        <dlpar-record>+
+    }
+    token dlpar-record {
+        ^^
+        <record-number-field>
+        \s+
+        <partition-field>
+        $$ \n
+        ^^ \s+
+        <active-field>
+        <os-field>
+        .+?
+        $$ \n
+    }
+    token record-number-field   { '<#' <record-number> '>'          }
+    token record-number         { \d+                               }
+    token partition-field       {
+                                    Partition ':<'
+                                    <partition-number>
+                                    '*'
+                                    <model-type>
+                                    '*'
+                                    <serial-number>
+                                    ',' \s+
+                                    <ip-label>*
+                                    ',' \s+
+                                    <ip-address>
+                                    '>'
+                                }
+    token partition-number      { \d+                               }
+    token model-type            { <model> '-' <type>                }
+    token model                 { \w ** 4                           }
+    token type                  { \w ** 3                           }
+    token serial-number         { \w ** 7                           }
+    token ip-label              { <-[,]>+                           }
+    token ip-address            { <ip-address-octet> ** 4 %% '.'    }
+    token ip-address-octet      { \d ** 1..3                        }
+    token active-field          { Active ':<' <active> '>,' \s+     }
+    token active                { \d                                }
+    token os-field              {
+                                    OS ':<'
+                                    <os-name>
+                                    ',' \s+
+                                    <os-vr>
+                                    ',' \s+
+                                    <os-level>
+                                    '>'
+                                }
+    token os-name               { <-[,]>+                           }
+    token os-vr                 { <-[,]>+                           }
+    token os-level              { <-[\>]>+                          }
+}
+
+class LSPPARTITIONDLPAR-actions {
+    has $.hmc is required;
+
+    method dlpar-record ($/) {
+        my Int $partition-number    = +$/<partition-field><partition-number>;
+        %HMC{$!hmc}<LSPPARTITIONDLPAR>{$partition-number} = LSPPARTITIONDLPAR.new:
+            :$partition-number,
+            :model(~$/<partition-field><model-type><model>),
+            :type(~$/<partition-field><model-type><type>),
+            :serial-number(~$/<partition-field><serial-number>),
+            :ip-address(~$/<partition-field><ip-address>),
+            :active(?$/<active-field><active>),
+            :os-name(~$/<os-field><os-name>),
+            :os-vr(~$/<os-field><os-vr>),
+            :os-level(~$/<os-field><os-level>),
+        ;
+
+    }
 }
 
 grammar FCS-grammar {
@@ -101,7 +192,7 @@ grammar FCS-grammar {
     token hardware-location { \w+ '.' \w+ '.' <[0..9A..F]>+ .+? $$  }
 }
 
-class FCS-actions {
+class FCS-vio-actions {
     has $.vio-server    is required;
 
     method fcs-record ($/) {
@@ -115,8 +206,23 @@ class FCS-actions {
     }
 }
 
+class FCS-client-actions {
+    has $.partition-number  is required;
+
+    method fcs-record ($/) {
+        my Int $fcs-number = +$/<fcs-device><fcs-number>;
+        %client-results{$!partition-number}[$fcs-number]   = 
+            FCS.new:
+                :physical-location(~$/<hardware-location>),
+                :world-wide-node-name(~$/<Z8>),
+                :world-wide-port-name(~$/<network-address>),
+            ;
+    }
+}
+
 sub MAIN (
     Str                 :$hmc!,                                 #= HMC to query
+    Str                 :$model-type,                           #= restrict managed systems to only M-T
     Bool                :$group-by-vios,                        #= group data around vio servers
     Bool                :$csv,                                  #= dump CSV to STDOUT
     Str                 :$grid-proxy-host   = '127.0.0.1',      #= hostname of grid proxy for remote services
@@ -153,7 +259,6 @@ sub MAIN (
     }
     cache(:cache-file-name($preferences-cache-file-name), :data(to-json({light-mode => $reverse-highlight})));
 
-    my %hmc;
     my %command;
     %command{$hmc}          = ['ssh', $hmc, 'lssyscfg', '-r', 'sys', '-F', 'name'];
     my $command-manager     = Async::Command::Multi.new(:%command, :20time-out, :8batch);
@@ -161,13 +266,40 @@ sub MAIN (
     for %results.keys.sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List) -> $hmc-server {
         for %results{$hmc-server}.stdout-results.trim.split("\n").list -> $managed-server {
             next unless $managed-server ~~ /9080 '-' HEX/;
-            %hmc{$hmc-server}{$managed-server} = {};
+            %HMC{$hmc-server}<managed-servers>{$managed-server} = {};
         }
-        die "No managed servers found on HMC '$hmc-server'!" unless %hmc{$hmc}.elems;
+        die "No managed servers found on HMC '$hmc-server'!" unless %HMC{$hmc}.elems;
     }
 
     %command                = ();
-    for %hmc{$hmc}.keys.sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List) -> $managed-server {
+    %command{$hmc}          = ['ssh', $hmc, 'lspartition', '-dlpar'];
+    $command-manager        = Async::Command::Multi.new(:%command, :20time-out, :8batch);
+    %results                = $command-manager.sow.reap;
+    LSPPARTITIONDLPAR-grammar.parse(%results{$hmc}.stdout-results, :actions(LSPPARTITIONDLPAR-actions.new(:$hmc))) || die;
+
+    %command                = ();
+    for %HMC{$hmc}<LSPPARTITIONDLPAR>.keys -> $partition-number {
+        next if $model-type && %HMC{$hmc}<LSPPARTITIONDLPAR>{$partition-number}.model ~ '-' ~ %HMC{$hmc}<LSPPARTITIONDLPAR>{$partition-number}.type ne $model-type;
+        %command{$partition-number} = ['ssh', %HMC{$hmc}<LSPPARTITIONDLPAR>{$partition-number}.ip-address, '-o', 'StrictHostKeyChecking=accept-new', 'lscfg', '-vl', 'fcs*'];
+    }
+    my $deferred-command-manager = Async::Command::Multi.new(:%command, :10time-out, :8batch).sow;
+    %results                = $deferred-command-manager.reap;
+
+    for %HMC{$hmc}<managed-servers>.keys.sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List) -> $managed-server {
+        for %results.keys.sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List) -> $partition-number {
+            FCS-grammar.parse(%results{$partition-number}.stdout-results, :actions(FCS-client-actions.new(:$partition-number)));
+            next                if  %results{$partition-number}.exit-code;
+            %HMC{$hmc}<managed-servers>{$managed-server}<lpar>{$partition-number}<fcs> = %client-results{$partition-number};
+        }
+    }
+
+ddt %HMC{$hmc}<managed-servers>{'Server-9080-HEX-SN78725A8'}<lpar>;
+die;
+
+
+
+    %command                = ();
+    for %HMC{$hmc}<managed-servers>.keys.sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List) -> $managed-server {
         %command{$managed-server} = ['ssh', $hmc, 'lssyscfg', '-m', $managed-server, '-r', 'lpar', '-F', 'lpar_id,name'];
     }
     $command-manager        = Async::Command::Multi.new(:%command, :20time-out, :8batch);
@@ -175,34 +307,34 @@ sub MAIN (
     for %results.keys.sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List) -> $managed-server {
         for %results{$managed-server}.stdout-results.trim.split("\n").list -> $record {
             my ($lpar-id, $name) = $record.split: ',';
-            %hmc{$hmc}{$managed-server}<id2name>{$lpar-id}  = $name;
-            %hmc{$hmc}{$managed-server}<name2id>{$name}     = $lpar-id;
+            %HMC{$hmc}<managed-servers>{$managed-server}<id2name>{$lpar-id}  = $name;
+            %HMC{$hmc}<managed-servers>{$managed-server}<name2id>{$name}     = $lpar-id;
         }
     }
 
-    for %hmc{$hmc}.keys.sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List) -> $managed-server {
-        for %hmc{$hmc}{$managed-server}<name2id>.keys -> $name {
-            %hmc{$hmc}{$managed-server}<vios>{$name} = {} if $name ~~ /vio/;
+    for %HMC{$hmc}<managed-servers>.keys.sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List) -> $managed-server {
+        for %HMC{$hmc}<managed-servers>{$managed-server}<name2id>.keys -> $name {
+            %HMC{$hmc}<managed-servers>{$managed-server}<vios>{$name} = {} if $name ~~ /vio/;
         }
     }
 
     %command                = ();
-    for %hmc{$hmc}.keys.sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List) -> $managed-server {
-        for %hmc{$hmc}{$managed-server}<vios>.keys.sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List) -> $vio {
+    for %HMC{$hmc}<managed-servers>.keys.sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List) -> $managed-server {
+        for %HMC{$hmc}<managed-servers>{$managed-server}<vios>.keys.sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List) -> $vio {
             %command{$vio}      = ['ssh', 'padmin@' ~ $vio, 'ioscli', 'lsdev', '-dev', 'fcs*', '-vpd'];
         }
         $command-manager        = Async::Command::Multi.new(:%command, :20time-out, :8batch);
         %results                = $command-manager.sow.reap;
         for %results.keys.sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List) -> $vio-server {
-            FCS-grammar.parse(%results{$vio-server}.stdout-results, :actions(FCS-actions.new(:$vio-server)));
+            FCS-grammar.parse(%results{$vio-server}.stdout-results, :actions(FCS-vio-actions.new(:$vio-server)));
             die 'No fcs adapters found!' unless %vios-results{$vio-server}.elems;
-            %hmc{$hmc}{$managed-server}<vios>{$vio-server}<fcs> = %vios-results{$vio-server};
+            %HMC{$hmc}<managed-servers>{$managed-server}<vios>{$vio-server}<fcs> = %vios-results{$vio-server};
         }
     }
 
     %command                = ();
-    for %hmc{$hmc}.keys.sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List) -> $managed-server {
-        for %hmc{$hmc}{$managed-server}<vios>.keys -> $vio {
+    for %HMC{$hmc}<managed-servers>.keys.sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List) -> $managed-server {
+        for %HMC{$hmc}<managed-servers>{$managed-server}<vios>.keys -> $vio {
             %command{$vio}      = ['ssh', 'padmin@' ~ $vio, 'ioscli', 'lsmap', '-npiv', '-all', '-fmt', ':'];
         }
         $command-manager        = Async::Command::Multi.new(:%command, :20time-out, :8batch);
@@ -210,7 +342,7 @@ sub MAIN (
         for %results.keys.sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List) -> $vio-server {
             for %results{$vio-server}.stdout-results.trim.split("\n").list -> $record {
                 my @fields      = $record.split(':');
-                %hmc{$hmc}{$managed-server}<vios>{$vio-server}<npiv>{@fields[0]} = NPIV.new:
+                %HMC{$hmc}<managed-servers>{$managed-server}<vios>{$vio-server}<npiv>{@fields[0]} = NPIV.new:
                     :server-vadapter-location(@fields[1]),
                     :lpar-id(@fields[2].Int),
                     :lpar-name(@fields[3] ?? @fields[3] !! ''),
@@ -223,7 +355,7 @@ sub MAIN (
                     :client-fcs-device(@fields[10]),
                     :client-vadapter-location(@fields[11]),
                 ;
-                %hmc{$hmc}{$managed-server}<vios>{$vio-server}<viopadaptername2vfchost>{@fields[6]}.push: @fields[0];
+                %HMC{$hmc}<managed-servers>{$managed-server}<vios>{$vio-server}<viopadaptername2vfchost>{@fields[6]}.push: @fields[0];
             }
         }
     }
@@ -245,27 +377,27 @@ sub MAIN (
     $grid.add-heading('LPAR Adapter',       :justification<center>);
     $grid.add-heading('LPAR Location',      :justification<left>);
     $grid.add-heading('LPAR WW Node Name',  :justification<right>);
-    for %hmc{$hmc}.keys.sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List) -> $managed-server {
+    for %HMC{$hmc}<managed-servers>.keys.sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List) -> $managed-server {
 #       $grid.add-cell(:cell(Our::Grid::Cell.new(:text($managed-server), :bold,                                                                         :justification<left>)), :0col);
-        for %hmc{$hmc}{$managed-server}<vios>.keys.sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List) -> $vio {
+        for %HMC{$hmc}<managed-servers>{$managed-server}<vios>.keys.sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List) -> $vio {
             $grid.add-cell(:cell(Our::Grid::Cell.new(:text($vio),                                                                                       :justification<left>)), :0col);
-            loop (my $fcs-number = 0; $fcs-number < %hmc{$hmc}{$managed-server}<vios>{$vio}<fcs>.elems; $fcs-number++) {
-                next unless %hmc{$hmc}{$managed-server}<vios>{$vio}<fcs>[$fcs-number]:exists;
+            loop (my $fcs-number = 0; $fcs-number < %HMC{$hmc}<managed-servers>{$managed-server}<vios>{$vio}<fcs>.elems; $fcs-number++) {
+                next unless %HMC{$hmc}<managed-servers>{$managed-server}<vios>{$vio}<fcs>[$fcs-number]:exists;
                 $grid.add-cell(:cell(Our::Grid::Cell.new(:text('fcs' ~ $fcs-number),                                                                    :justification<left>)), :1col);
-                $grid.add-cell(:cell(Our::Grid::Cell.new(:text(%hmc{$hmc}{$managed-server}<vios>{$vio}<fcs>[$fcs-number].physical-location),            :justification<left>)), :2col);
-                $grid.add-cell(:cell(Our::Grid::Cell.new(:text(%hmc{$hmc}{$managed-server}<vios>{$vio}<fcs>[$fcs-number].world-wide-node-name),         :justification<left>)), :3col);
-                $grid.add-cell(:cell(Our::Grid::Cell.new(:text(%hmc{$hmc}{$managed-server}<vios>{$vio}<fcs>[$fcs-number].world-wide-port-name),         :justification<left>)), :4col);
-                for %hmc{$hmc}{$managed-server}<vios>{$vio}<viopadaptername2vfchost>{'fcs' ~ $fcs-number}.list -> $vfchost {
+                $grid.add-cell(:cell(Our::Grid::Cell.new(:text(%HMC{$hmc}<managed-servers>{$managed-server}<vios>{$vio}<fcs>[$fcs-number].physical-location),            :justification<left>)), :2col);
+                $grid.add-cell(:cell(Our::Grid::Cell.new(:text(%HMC{$hmc}<managed-servers>{$managed-server}<vios>{$vio}<fcs>[$fcs-number].world-wide-node-name),         :justification<left>)), :3col);
+                $grid.add-cell(:cell(Our::Grid::Cell.new(:text(%HMC{$hmc}<managed-servers>{$managed-server}<vios>{$vio}<fcs>[$fcs-number].world-wide-port-name),         :justification<left>)), :4col);
+                for %HMC{$hmc}<managed-servers>{$managed-server}<vios>{$vio}<viopadaptername2vfchost>{'fcs' ~ $fcs-number}.list -> $vfchost {
                     next unless $vfchost;
                     $grid.add-cell(:cell(Our::Grid::Cell.new(:text($vfchost),                                                                           :justification<left>)), :5col);
-                    if %hmc{$hmc}{$managed-server}<vios>{$vio}<npiv>{$vfchost}.lpar-name {
-                        $grid.add-cell(:cell(Our::Grid::Cell.new(:text(%hmc{$hmc}{$managed-server}<vios>{$vio}<npiv>{$vfchost}.lpar-name),              :justification<left>)), :6col);
+                    if %HMC{$hmc}<managed-servers>{$managed-server}<vios>{$vio}<npiv>{$vfchost}.lpar-name {
+                        $grid.add-cell(:cell(Our::Grid::Cell.new(:text(%HMC{$hmc}<managed-servers>{$managed-server}<vios>{$vio}<npiv>{$vfchost}.lpar-name),              :justification<left>)), :6col);
                     }
                     else {
                         $grid.add-cell(:cell(Our::Grid::Cell.new(:text(''),                                                                             :justification<left>)), :6col);
                     }
-                    $grid.add-cell(:cell(Our::Grid::Cell.new(:text(%hmc{$hmc}{$managed-server}<vios>{$vio}<npiv>{$vfchost}.client-fcs-device),          :justification<left>)), :7col);
-                    $grid.add-cell(:cell(Our::Grid::Cell.new(:text(%hmc{$hmc}{$managed-server}<vios>{$vio}<npiv>{$vfchost}.client-vadapter-location),   :justification<left>)), :8col);
+                    $grid.add-cell(:cell(Our::Grid::Cell.new(:text(%HMC{$hmc}<managed-servers>{$managed-server}<vios>{$vio}<npiv>{$vfchost}.client-fcs-device),          :justification<left>)), :7col);
+                    $grid.add-cell(:cell(Our::Grid::Cell.new(:text(%HMC{$hmc}<managed-servers>{$managed-server}<vios>{$vio}<npiv>{$vfchost}.client-vadapter-location),   :justification<left>)), :8col);
                     $grid.add-cell(:cell(Our::Grid::Cell.new(:text('TBD'),                                                                              :justification<left>)), :9col);
                     $grid.current-row++;
                 }
