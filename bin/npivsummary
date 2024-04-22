@@ -280,22 +280,18 @@ sub MAIN (
     %command                = ();
     for %HMC{$hmc}<LSPPARTITIONDLPAR>.keys -> $partition-number {
         next if $model-type && %HMC{$hmc}<LSPPARTITIONDLPAR>{$partition-number}.model ~ '-' ~ %HMC{$hmc}<LSPPARTITIONDLPAR>{$partition-number}.type ne $model-type;
-        %command{$partition-number} = ['ssh', %HMC{$hmc}<LSPPARTITIONDLPAR>{$partition-number}.ip-address, '-o', 'StrictHostKeyChecking=accept-new', 'lscfg', '-vl', 'fcs*'];
+        %command{$partition-number} = [
+            'ssh',
+            %HMC{$hmc}<LSPPARTITIONDLPAR>{$partition-number}.ip-address,
+            '-o', 'BatchMode=yes',
+            '-o', 'PreferredAuthentications=publickey',
+            'lscfg',
+            '-vl',
+            'fcs*',
+        ];
     }
+
     my $deferred-command-manager = Async::Command::Multi.new(:%command, :10time-out, :8batch).sow;
-    %results                = $deferred-command-manager.reap;
-
-    for %HMC{$hmc}<managed-servers>.keys.sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List) -> $managed-server {
-        for %results.keys.sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List) -> $partition-number {
-            FCS-grammar.parse(%results{$partition-number}.stdout-results, :actions(FCS-client-actions.new(:$partition-number)));
-            next                if  %results{$partition-number}.exit-code;
-            %HMC{$hmc}<managed-servers>{$managed-server}<lpar>{$partition-number}<fcs> = %client-results{$partition-number};
-        }
-    }
-
-ddt %HMC{$hmc}<managed-servers>{'Server-9080-HEX-SN78725A8'}<lpar>;
-die;
-
 
 
     %command                = ();
@@ -377,28 +373,61 @@ die;
     $grid.add-heading('LPAR Adapter',       :justification<center>);
     $grid.add-heading('LPAR Location',      :justification<left>);
     $grid.add-heading('LPAR WW Node Name',  :justification<right>);
+
+#   reap the deferred promises from all the selected LPARs...
+    %results                = $deferred-command-manager.reap;
     for %HMC{$hmc}<managed-servers>.keys.sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List) -> $managed-server {
-#       $grid.add-cell(:cell(Our::Grid::Cell.new(:text($managed-server), :bold,                                                                         :justification<left>)), :0col);
+        for %results.keys.sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List) -> $partition-number {
+            FCS-grammar.parse(%results{$partition-number}.stdout-results, :actions(FCS-client-actions.new(:$partition-number)));
+            next                if  %results{$partition-number}.exit-code;
+            %HMC{$hmc}<managed-servers>{$managed-server}<lpar>{$partition-number}<fcs> = %client-results{$partition-number};
+        }
+    }
+#ddt %HMC{$hmc};
+#die;
+#   9 => {1} @175
+#       fcs => [4] @176
+#           0 = .FCS @177
+#               $.physical-location = U9080.HEX.78725A8-V9-C133-T0.Str
+#               $.world-wide-node-name = C05076038EE20010.Str
+#               $.world-wide-port-name = C05076038EE20010.Str
+#           1 = .FCS @178
+#               $.physical-location = U9080.HEX.78725A8-V9-C233-T0.Str
+#               $.world-wide-node-name = C05076038EE20014.Str
+#               $.world-wide-port-name = C05076038EE20014.Str
+
+
+    for %HMC{$hmc}<managed-servers>.keys.sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List) -> $managed-server {
+#       $grid.add-cell(:cell(Our::Grid::Cell.new(:text($managed-server), :bold,                                                                                         :justification<left>)), :0col);
         for %HMC{$hmc}<managed-servers>{$managed-server}<vios>.keys.sort(*.split(/\d+/, :kv).map({ (try .Numeric) // $_}).List) -> $vio {
-            $grid.add-cell(:cell(Our::Grid::Cell.new(:text($vio),                                                                                       :justification<left>)), :0col);
+            $grid.add-cell(:cell(Our::Grid::Cell.new(:text($vio),                                                                                                       :justification<left>)), :0col);
             loop (my $fcs-number = 0; $fcs-number < %HMC{$hmc}<managed-servers>{$managed-server}<vios>{$vio}<fcs>.elems; $fcs-number++) {
                 next unless %HMC{$hmc}<managed-servers>{$managed-server}<vios>{$vio}<fcs>[$fcs-number]:exists;
-                $grid.add-cell(:cell(Our::Grid::Cell.new(:text('fcs' ~ $fcs-number),                                                                    :justification<left>)), :1col);
-                $grid.add-cell(:cell(Our::Grid::Cell.new(:text(%HMC{$hmc}<managed-servers>{$managed-server}<vios>{$vio}<fcs>[$fcs-number].physical-location),            :justification<left>)), :2col);
-                $grid.add-cell(:cell(Our::Grid::Cell.new(:text(%HMC{$hmc}<managed-servers>{$managed-server}<vios>{$vio}<fcs>[$fcs-number].world-wide-node-name),         :justification<left>)), :3col);
-                $grid.add-cell(:cell(Our::Grid::Cell.new(:text(%HMC{$hmc}<managed-servers>{$managed-server}<vios>{$vio}<fcs>[$fcs-number].world-wide-port-name),         :justification<left>)), :4col);
+                $grid.add-cell(:cell(Our::Grid::Cell.new(:text('fcs' ~ $fcs-number),                                                                                    :justification<left>)), :1col);
+                $grid.add-cell(:cell(Our::Grid::Cell.new(:text(%HMC{$hmc}<managed-servers>{$managed-server}<vios>{$vio}<fcs>[$fcs-number].physical-location),           :justification<left>)), :2col);
+                $grid.add-cell(:cell(Our::Grid::Cell.new(:text(%HMC{$hmc}<managed-servers>{$managed-server}<vios>{$vio}<fcs>[$fcs-number].world-wide-node-name),        :justification<left>)), :3col);
+                $grid.add-cell(:cell(Our::Grid::Cell.new(:text(%HMC{$hmc}<managed-servers>{$managed-server}<vios>{$vio}<fcs>[$fcs-number].world-wide-port-name),        :justification<left>)), :4col);
                 for %HMC{$hmc}<managed-servers>{$managed-server}<vios>{$vio}<viopadaptername2vfchost>{'fcs' ~ $fcs-number}.list -> $vfchost {
                     next unless $vfchost;
-                    $grid.add-cell(:cell(Our::Grid::Cell.new(:text($vfchost),                                                                           :justification<left>)), :5col);
+                    $grid.add-cell(:cell(Our::Grid::Cell.new(:text($vfchost),                                                                                           :justification<left>)), :5col);
                     if %HMC{$hmc}<managed-servers>{$managed-server}<vios>{$vio}<npiv>{$vfchost}.lpar-name {
-                        $grid.add-cell(:cell(Our::Grid::Cell.new(:text(%HMC{$hmc}<managed-servers>{$managed-server}<vios>{$vio}<npiv>{$vfchost}.lpar-name),              :justification<left>)), :6col);
+                        $grid.add-cell(:cell(Our::Grid::Cell.new(:text(%HMC{$hmc}<managed-servers>{$managed-server}<vios>{$vio}<npiv>{$vfchost}.lpar-name),             :justification<left>)), :6col);
                     }
                     else {
-                        $grid.add-cell(:cell(Our::Grid::Cell.new(:text(''),                                                                             :justification<left>)), :6col);
+                        $grid.add-cell(:cell(Our::Grid::Cell.new(:text(''),                                                                                             :justification<left>)), :6col);
                     }
-                    $grid.add-cell(:cell(Our::Grid::Cell.new(:text(%HMC{$hmc}<managed-servers>{$managed-server}<vios>{$vio}<npiv>{$vfchost}.client-fcs-device),          :justification<left>)), :7col);
-                    $grid.add-cell(:cell(Our::Grid::Cell.new(:text(%HMC{$hmc}<managed-servers>{$managed-server}<vios>{$vio}<npiv>{$vfchost}.client-vadapter-location),   :justification<left>)), :8col);
-                    $grid.add-cell(:cell(Our::Grid::Cell.new(:text('TBD'),                                                                              :justification<left>)), :9col);
+                    $grid.add-cell(:cell(Our::Grid::Cell.new(:text(%HMC{$hmc}<managed-servers>{$managed-server}<vios>{$vio}<npiv>{$vfchost}.client-fcs-device),         :justification<left>)), :7col);
+                    $grid.add-cell(:cell(Our::Grid::Cell.new(:text(%HMC{$hmc}<managed-servers>{$managed-server}<vios>{$vio}<npiv>{$vfchost}.client-vadapter-location),  :justification<left>)), :8col);
+
+
+                    my $client-adapter-world-wide-node-name = '';
+                    my $lpar-id                             = %HMC{$hmc}<managed-servers>{$managed-server}<vios>{$vio}<npiv>{$vfchost}.lpar-id;
+                    my $client-adapter                      = %HMC{$hmc}<managed-servers>{$managed-server}<vios>{$vio}<npiv>{$vfchost}.client-fcs-device;
+                    my $client-adapter-number               = $client-adapter.subst('fcs');
+                    if %HMC{$hmc}<managed-servers>{$managed-server}<lpar>{$lpar-id}<fcs>[$client-adapter-number]:exists {
+                        $client-adapter-world-wide-node-name    = %HMC{$hmc}<managed-servers>{$managed-server}<lpar>{$lpar-id}<fcs>[$client-adapter-number].world-wide-node-name;
+                    }
+                    $grid.add-cell(:cell(Our::Grid::Cell.new(:text($client-adapter-world-wide-node-name),                                                               :justification<left>)), :9col);
                     $grid.current-row++;
                 }
             }
