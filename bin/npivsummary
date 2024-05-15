@@ -15,48 +15,6 @@ use Our::Utilities;
 use Data::Dump::Tree;
 #use Grammar::Debugger;
 
-#  fcs0             U78D8.ND0.FGD01TZ-P0-C1-C0-T0  PCIe3 2-Port 32Gb FC Adapter (df1000e314101506)
-#
-#        Part Number.................01FT700
-#        Serial Number...............Y050HY1990A8
-#        EC Level....................P14610
-#        Customer Card ID Number.....578F
-#        Manufacturer................001D
-#        FRU Number..................01FT704
-#        Device Specific.(ZM)........3
-#        Network Address.............100000109BE073E1
-#        Device Specific.(Z0)........0000000C
-#        Device Specific.(Z1)........00000001
-#        Device Specific.(Z2)........00000000
-#        Device Specific.(Z3)........08090000
-#        Device Specific.(Z4)........01003001
-#        Device Specific.(Z5)........2E323537
-#        Device Specific.(Z6)........2E323537
-#        Device Specific.(Z7)........C0022C40
-#        Device Specific.(Z8)........200000109BE073E1
-#        Device Specific.(Z9)........12.4.257.30
-#        Device Specific.(ZA)........12.4.257.30
-#        Device Specific.(ZB)........30310000
-#        Device Specific.(ZC)........00040000
-#        Device Specific.(ZD)........000000FF
-#        Hardware Location Code......U78D8.ND0.FGD01TZ-P0-C1-C0-T0
-#
-#
-#  fcs0             U9080.HEX.78725A8-V255-C2155-T0  Virtual Fibre Channel Client Adapter
-#
-#        Network Address.............C050760C12130008
-#        Device Specific.(Z0)........
-#        Device Specific.(Z1)........
-#        Device Specific.(Z2)........
-#        Device Specific.(Z3)........
-#        Device Specific.(Z4)........
-#        Device Specific.(Z5)........
-#        Device Specific.(Z6)........
-#        Device Specific.(Z7)........
-#        Device Specific.(Z8)........C050760C12130008
-#        Device Specific.(Z9)........
-#        Hardware Location Code......U9080.HEX.78725A8-V255-C2155-T0
-
 my %HMC;
 my %vios-results;
 my %client-results;
@@ -145,9 +103,12 @@ my grammar LSPPARTITIONDLPAR-grammar {
                                     <os-level>
                                     '>'
                                 }
-    token os-name               { <-[,]>+                           }
-    token os-vr                 { <-[,]>+                           }
-    token os-level              { <-[\>]>+                          }
+
+#   OS:<, , >,
+
+    token os-name               { <-[,]>*                           }
+    token os-vr                 { <-[,]>*                           }
+    token os-level              { <-[\>]>*                          }
 }
 
 class LSPPARTITIONDLPAR-actions {
@@ -251,14 +212,12 @@ sub MAIN (
         $mailing = True;
     }
     my $reverse-highlight   = $light-mode ?? True !! False;
-    my $preferences-cache-file-name = cache-file-name(:meta<preferences>);
-    my $preferences-cache   = cache(:cache-file-name($preferences-cache-file-name));
-    $preferences-cache      = from-json($preferences-cache) if $preferences-cache;
+    my $preferences-cache   = Our::Cache.new;
+    my $preferences         = from-json($preferences-cache.fetch(:identifier<preferences>)) if $preferences-cache.set-identifier(:identifier<preferences>);
     without $light-mode {
-        $reverse-highlight  = $preferences-cache<light-mode> if $preferences-cache<light-mode>:exists;
+        $reverse-highlight  = $preferences<light-mode> if $preferences<light-mode>:exists;
     }
-    cache(:cache-file-name($preferences-cache-file-name), :data(to-json({light-mode => $reverse-highlight})));
-
+    $preferences-cache.store(:identifier<preferences>, :data(to-json({light-mode => $reverse-highlight})));
     my %command;
     %command{$hmc}          = ['ssh', $hmc, 'lssyscfg', '-r', 'sys', '-F', 'name'];
     my $command-manager     = Async::Command::Multi.new(:%command, :20time-out, :8batch);
