@@ -214,11 +214,11 @@ sub MAIN (
     my $reverse-highlight   = $light-mode ?? True !! False;
     my $identifier          = 'preferences';
     my $preferences-cache   = Our::Cache.new(:$identifier);
-    my $preferences         = from-json($preferences-cache.fetch(:$identifier)) if $preferences-cache.cache-hit;
+    my $preferences         = from-json($preferences-cache.fetch) if $preferences-cache.cache-hit;
     without $light-mode {
         $reverse-highlight  = $preferences<light-mode> if $preferences<light-mode>:exists;
     }
-    $preferences-cache.store(:$identifier, :data(to-json({light-mode => $reverse-highlight})));
+    $preferences-cache.store(:data(to-json({light-mode => $reverse-highlight})));
     my %command;
     %command{$hmc}          = ['ssh', $hmc, 'lssyscfg', '-r', 'sys', '-F', 'name'];
     my $command-manager     = Async::Command::Multi.new(:%command, :20time-out, :8batch);
